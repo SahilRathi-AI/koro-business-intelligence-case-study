@@ -1,20 +1,267 @@
-To showcase your Koro Case Study SQL skills effectively on GitHub, you should use a description that highlights your ability to transform messy raw data into a structured "Single Source of Truth."   
+/* =====================================================
+   KORO E-COMMERCE ANALYSIS PIPELINE
+   STEP 1 — DATA CLEANING
+   Standardise raw datasets and remove bad records
+===================================================== */
 
-Here is the in-depth description you can use for your Koro_SQL.sql file or repository section:
+CREATE OR REPLACE TABLE `koro-case-study-490118.koro_sql.clean_orders` AS
+SELECT DISTINCT
+    order_id,
+    customer_id,
+    SAFE_CAST(order_date AS DATE) AS order_date,
+    TRIM(product_number) AS sku,
+    UPPER(TRIM(country_iso)) AS country_iso
+FROM `koro-case-study-490118.koro_sql.orders`
+WHERE
+    order_id IS NOT NULL
+    AND customer_id IS NOT NULL
+    AND SAFE_CAST(order_date AS DATE) IS NOT NULL
+    AND LOWER(TRIM(product_number)) NOT IN ('', 'null', 'nan')
+    AND LOWER(TRIM(country_iso)) NOT IN ('', 'null', 'nan');
 
-🛠️ SQL Data Engineering & Modeling
-This script serves as the backbone of the analysis, moving from raw data ingestion to a refined business intelligence layer.   
+CREATE OR REPLACE TABLE `koro-case-study-490118.koro_sql.clean_marketing_sources` AS
+SELECT
+    order_id,
+    UPPER(TRIM(country_iso)) AS country_iso,
+    SAFE_CAST(ordertime AS TIMESTAMP) AS ordertime,
+    COALESCE(NULLIF(TRIM(utm_campaign),''),'unknown') AS utm_campaign,
+    COALESCE(NULLIF(TRIM(reporting_channel),''),'unknown') AS reporting_channel
+FROM `koro-case-study-490118.koro_sql.marketing_sources`
+WHERE
+    order_id IS NOT NULL
+    AND SAFE_CAST(ordertime AS TIMESTAMP) IS NOT NULL
+    AND LOWER(TRIM(country_iso)) NOT IN ('', 'null', 'nan');
+
+CREATE OR REPLACE TABLE `koro-case-study-490118.koro_sql.clean_product_locale` AS
+SELECT
+    TRIM(string_field_0) AS sku,
+    TRIM(string_field_1) AS product_name,
+    TRIM(string_field_2) AS locale
+FROM `koro-case-study-490118.koro_sql.product_locale`
+WHERE
+    LOWER(TRIM(string_field_0)) NOT IN ('', 'null', 'nan')
+    AND LOWER(TRIM(string_field_1)) NOT IN ('', 'null', 'nan');
+
+CREATE OR REPLACE TABLE `koro-case-study-490118.koro_sql.clean_product_universal` AS
+SELECT
+    TRIM(string_field_0) AS sku,
+    TRIM(string_field_1) AS main_category
+FROM `koro-case-study-490118.koro_sql.product_universal`
+WHERE
+    LOWER(TRIM(string_field_0)) NOT IN ('', 'null', 'nan')
+    AND LOWER(TRIM(string_field_1)) NOT IN ('', 'null', 'nan');
+
+/* =====================================================
+   STEP 2 — STAR SCHEMA NORMALIZATION
+===================================================== */
+
+CREATE OR REPLACE TABLE `koro-case-study-490118.koro_sql.dim_customers` AS
+SELECT DISTINCT
+    customer_id
+FROM `koro-case-study-490118.koro_sql.clean_orders`;
+
+CREATE OR REPLACE TABLE `koro-case-study-490118.koro_sql.dim_country` AS
+SELECT DISTINCT
+    country_iso
+FROM `koro-case-study-490118.koro_sql.clean_orders`;
+
+CREATE OR REPLACE TABLE `koro-case-study-490118.koro_sql.dim_date` AS
+SELECT DISTINCT
+    order_date,
+    EXTRACT(YEAR FROM order_date) AS year,
+    EXTRACT(MONTH FROM order_date) AS month,
+    EXTRACT(WEEK FROM order_date) AS week,
+    EXTRACT(DAY FROM order_date) AS day
+FROM `koro-case-study-490118.koro_sql.clean_orders`;
+
+CREATE OR REPLACE TABLE `koro-case-study-490118.koro_sql.dim_products` AS
+SELECT
+    p.sku,
+    ANY_VALUE(l.product_name) AS product_name,
+    p.main_category
+FROM `koro-case-study-490118.koro_sql.clean_product_universal` p
+LEFT JOIN `koro-case-study-490118.koro_sql.clean_product_locale` l
+ON p.sku = l.sku
+GROUP BY
+    p.sku,
+    p.main_category;
+
+CREATE OR REPLACE TABLE `koro-case-study-490118.koro_sql.dim_marketing` AS
+SELECT DISTINCT
+    reporting_channel,
+    utm_campaign
+FROM `koro-case-study-490118.koro_sql.clean_marketing_sources`;
+
+/* =====================================================
+   STEP 3 — FACT TABLE
+===================================================== */
+
+CREATE OR REPLACE TABLE `koro-case-study-490118.koro_sql.fact_orders` AS
+SELECT
+    o.order_id,
+    o.customer_id,
+    o.sku,
+    o.country_iso,
+    o.order_date,
+    m.reporting_channel,
+    m.utm_campaign
+FROM `koro-case-study-490118.koro_sql.clean_orders` o
+LEFT JOIN `koro-case-study-490118.koro_sql.clean_marketing_sources` m
+ON o.order_id = m.order_id
+AND o.country_iso = m.country_iso;
+
+/* =====================================================
+   STEP 4 — CUSTOMER ORDER ACTIVITY
+===================================================== */
+
+WITH ranked_orders AS (
+SELECT
+    order_id,
+    customer_id,
+    order_date,
+    reporting_channel,
+    ROW_NUMBER() OVER(
+        PARTITION BY customer_id
+        ORDER BY order_date
+    ) AS order_rank
+FROM `koro-case-study-490118.koro_sql.fact_orders`
+)
+
+SELECT
+    order_date,
+    reporting_channel,
+    COUNT(*) AS total_orders,
+    COUNTIF(order_rank = 1) AS first_orders,
+    ROUND(
+        SAFE_DIVIDE(
+            COUNTIF(order_rank = 1),
+            COUNT(*)
+        ) * 100, 2
+    ) AS new_customer_percentage
+FROM ranked_orders
+GROUP BY
+    order_date,
+    reporting_channel
+ORDER BY
+    order_date;
 
 
-Step 1: Data Cleaning & Standardization: Used SAFE_CAST and TRIM functions to handle inconsistent e-commerce timestamps and product IDs, ensuring 100% data integrity for downstream joins.   
 
+/* =====================================================
+   STEP 5 — REPEAT PURCHASE ANALYSIS
+===================================================== */
 
-Step 2: Business Logic Implementation: Engineered a clean_orders table that excludes "test" records and null identifiers, providing a reliable foundation for calculating KPIs like DAU (Daily Active Users) and Repeat Purchase Rates.   
+WITH base_orders AS (
+  SELECT
+    customer_id,
+    order_id,
+    DATE(order_date) AS order_date
+  FROM `koro-case-study-490118.koro_sql.fact_orders`
+),
 
+first_orders AS (
+  SELECT
+    customer_id,
+    MIN(order_date) AS first_order_date
+  FROM base_orders
+  GROUP BY customer_id
+),
 
-Step 3: Advanced Analytical Logic: * Implemented Common Table Expressions (CTEs) to segment customer cohorts by their first purchase date.   
+orders_enriched AS (
+  SELECT
+    b.customer_id,
+    b.order_id,
+    b.order_date,
+    f.first_order_date,
 
-Applied Window Functions (ROW_NUMBER() OVER) to rank top-performing and least-performing products by country (ISO), directly supporting inventory optimization strategies.   
+    CASE 
+      WHEN b.order_date = f.first_order_date THEN 1
+      ELSE 0
+    END AS is_first_order,
 
+    DATE_DIFF(b.order_date, f.first_order_date, DAY) AS days_after_first
+  FROM base_orders b
+  JOIN first_orders f
+    ON b.customer_id = f.customer_id
+)
 
-Step 4: Marketing Attribution: Performed complex LEFT JOIN operations between transactional data and marketing sources to attribute revenue to specific channels (e.g., Influencer vs. Organic Social)
+SELECT
+  customer_id,
+  order_id,
+  order_date,
+  first_order_date,
+  is_first_order,
+
+  CASE WHEN days_after_first BETWEEN 1 AND 10 THEN 1 ELSE 0 END AS orders_within_10_days,
+  CASE WHEN days_after_first BETWEEN 1 AND 15 THEN 1 ELSE 0 END AS orders_within_15_days,
+  CASE WHEN days_after_first BETWEEN 1 AND 20 THEN 1 ELSE 0 END AS orders_within_20_days
+
+FROM orders_enriched;
+
+/* =====================================================
+   STEP 6 — CATEGORY POPULARITY BY COUNTRY
+===================================================== */
+
+SELECT
+    f.country_iso,
+    p.main_category,
+    COUNT(DISTINCT f.order_id) AS total_orders,
+    COUNT(DISTINCT f.sku) AS total_skus
+FROM `koro-case-study-490118.koro_sql.fact_orders` f
+LEFT JOIN `koro-case-study-490118.koro_sql.dim_products` p
+ON f.sku = p.sku
+GROUP BY
+    f.country_iso,
+    p.main_category
+ORDER BY
+    f.country_iso,
+    total_orders DESC;
+
+/* =====================================================
+   STEP 7 — PRODUCT RANKING BY COUNTRY
+===================================================== */
+
+WITH product_orders AS (
+SELECT
+    country_iso,
+    sku,
+    COUNT(*) AS order_count
+FROM `koro-case-study-490118.koro_sql.fact_orders`
+GROUP BY country_iso, sku
+),
+
+ranked_products AS (
+SELECT
+    country_iso,
+    sku,
+    order_count,
+    ROW_NUMBER() OVER(
+        PARTITION BY country_iso
+        ORDER BY order_count DESC
+    ) AS top_rank,
+    ROW_NUMBER() OVER(
+        PARTITION BY country_iso
+        ORDER BY order_count ASC
+    ) AS least_rank
+FROM product_orders
+)
+
+SELECT
+    country_iso AS country,
+    r.sku,
+    COALESCE(p.product_name,'Unknown Product') AS product_name,
+    r.order_count,
+    CASE
+        WHEN top_rank <= 5 THEN 'Top Product'
+        WHEN least_rank <= 5 THEN 'Least Product'
+    END AS product_type
+FROM ranked_products r
+LEFT JOIN `koro-case-study-490118.koro_sql.dim_products` p
+ON r.sku = p.sku
+WHERE
+    top_rank <= 5
+    OR least_rank <= 5
+ORDER BY
+    country,
+    CASE WHEN product_type = 'Top Product' THEN 1 ELSE 2 END,
+    order_count DESC;
