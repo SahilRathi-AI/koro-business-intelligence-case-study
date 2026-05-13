@@ -1,0 +1,20 @@
+To showcase your Koro Case Study SQL skills effectively on GitHub, you should use a description that highlights your ability to transform messy raw data into a structured "Single Source of Truth."   
+
+Here is the in-depth description you can use for your Koro_SQL.sql file or repository section:
+
+🛠️ SQL Data Engineering & Modeling
+This script serves as the backbone of the analysis, moving from raw data ingestion to a refined business intelligence layer.   
+
+
+Step 1: Data Cleaning & Standardization: Used SAFE_CAST and TRIM functions to handle inconsistent e-commerce timestamps and product IDs, ensuring 100% data integrity for downstream joins.   
+
+
+Step 2: Business Logic Implementation: Engineered a clean_orders table that excludes "test" records and null identifiers, providing a reliable foundation for calculating KPIs like DAU (Daily Active Users) and Repeat Purchase Rates.   
+
+
+Step 3: Advanced Analytical Logic: * Implemented Common Table Expressions (CTEs) to segment customer cohorts by their first purchase date.   
+
+Applied Window Functions (ROW_NUMBER() OVER) to rank top-performing and least-performing products by country (ISO), directly supporting inventory optimization strategies.   
+
+
+Step 4: Marketing Attribution: Performed complex LEFT JOIN operations between transactional data and marketing sources to attribute revenue to specific channels (e.g., Influencer vs. Organic Social)
